@@ -31,6 +31,8 @@ func TestWriteLaunchAgent(t *testing.T) {
 		"<string>daemon</string>",
 		"<key>RunAtLoad</key>",
 		"<key>KeepAlive</key>",
+		"<key>SuccessfulExit</key>",
+		"<false/>",
 		"<string>Background</string>",
 		paths.StdoutPath,
 		paths.StderrPath,
