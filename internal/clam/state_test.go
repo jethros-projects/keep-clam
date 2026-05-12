@@ -41,20 +41,23 @@ func TestWriteStateRoundTrip(t *testing.T) {
 	expiresAt := enabledAt.Add(4 * time.Hour)
 	heartbeat := enabledAt.Add(time.Minute)
 	closed := true
+	previousDisableSleep := 0
 
 	want := RuntimeState{
-		Enabled:        true,
-		EnabledAt:      &enabledAt,
-		TimeoutSeconds: int64((4 * time.Hour).Seconds()),
-		ExpiresAt:      &expiresAt,
-		BinaryPath:     "/tmp/clam",
-		DaemonPID:      11,
-		CaffeinatePID:  12,
-		PMSetNoIdlePID: 13,
-		IOKitAssertion: true,
-		LastLidClosed:  &closed,
-		LastHeartbeat:  &heartbeat,
-		LastError:      "test warning",
+		Enabled:              true,
+		EnabledAt:            &enabledAt,
+		TimeoutSeconds:       int64((4 * time.Hour).Seconds()),
+		ExpiresAt:            &expiresAt,
+		BinaryPath:           "/tmp/clam",
+		DaemonPID:            11,
+		CaffeinatePID:        12,
+		PMSetNoIdlePID:       13,
+		IOKitAssertion:       true,
+		ForceDisableSleep:    true,
+		PreviousDisableSleep: &previousDisableSleep,
+		LastLidClosed:        &closed,
+		LastHeartbeat:        &heartbeat,
+		LastError:            "test warning",
 	}
 
 	if err := writeState(path, want); err != nil {
