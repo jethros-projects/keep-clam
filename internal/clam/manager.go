@@ -15,6 +15,11 @@ type Manager struct {
 	Now   func() time.Time
 }
 
+type EnableOptions struct {
+	Timeout           time.Duration
+	ForceDisableSleep bool
+}
+
 func NewManager(paths Paths, now func() time.Time) Manager {
 	if now == nil {
 		now = time.Now
@@ -22,7 +27,7 @@ func NewManager(paths Paths, now func() time.Time) Manager {
 	return Manager{Paths: paths, Now: now}
 }
 
-func (m Manager) Enable(ctx context.Context, timeout time.Duration) (RuntimeState, error) {
+func (m Manager) Enable(ctx context.Context, options EnableOptions) (RuntimeState, error) {
 	if runtime.GOOS != "darwin" {
 		return RuntimeState{}, errors.New("clam only supports macOS")
 	}
@@ -45,21 +50,38 @@ func (m Manager) Enable(ctx context.Context, timeout time.Duration) (RuntimeStat
 	state.Enabled = true
 	state.BinaryPath = executable
 	state.LastError = ""
-	if timeout > 0 {
-		state.TimeoutSeconds = int64(timeout.Seconds())
-		expires := now.Add(timeout).UTC()
+	state.ForceDisableSleep = false
+	state.PreviousDisableSleep = nil
+	if options.Timeout > 0 {
+		state.TimeoutSeconds = int64(options.Timeout.Seconds())
+		expires := now.Add(options.Timeout).UTC()
 		state.ExpiresAt = &expires
 	} else {
 		state.TimeoutSeconds = 0
 		state.ExpiresAt = nil
 	}
+	if options.ForceDisableSleep {
+		previous, err := ReadDisableSleep(ctx)
+		if err != nil {
+			return RuntimeState{}, fmt.Errorf("read disablesleep setting: %w", err)
+		}
+		if err := SetDisableSleep(ctx, 1, true); err != nil {
+			return RuntimeState{}, fmt.Errorf("enable force mode with sudo pmset disablesleep: %w", err)
+		}
+		state.ForceDisableSleep = true
+		state.PreviousDisableSleep = &previous
+	}
 	if err := writeState(m.Paths.StatePath, state); err != nil {
+		_ = restoreDisableSleep(ctx, state, true)
 		return RuntimeState{}, fmt.Errorf("write state: %w", err)
 	}
 	if err := writeLaunchAgent(m.Paths, executable); err != nil {
+		_ = restoreDisableSleep(ctx, state, true)
 		return RuntimeState{}, err
 	}
 	if err := restartLaunchAgent(ctx, m.Paths.PlistPath); err != nil {
+		_ = stopLaunchAgent(ctx, m.Paths.PlistPath)
+		_ = restoreDisableSleep(ctx, state, true)
 		_ = os.Remove(m.Paths.PlistPath)
 		_ = os.RemoveAll(m.Paths.StateDir)
 		return RuntimeState{}, err
@@ -75,6 +97,9 @@ func (m Manager) Disable(ctx context.Context) error {
 	}
 	if state.PMSetNoIdlePID > 0 {
 		_ = terminateIfCommand(state.PMSetNoIdlePID, "pmset")
+	}
+	if err := restoreDisableSleep(ctx, state, true); err != nil {
+		return err
 	}
 	if err := os.Remove(m.Paths.PlistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove launch agent plist: %w", err)
@@ -104,4 +129,18 @@ func (m Manager) Status(ctx context.Context) (Status, error) {
 		PowerSource:       powerSource,
 		LaunchAgentLoaded: loaded,
 	}, nil
+}
+
+func restoreDisableSleep(ctx context.Context, state RuntimeState, prompt bool) error {
+	if !state.ForceDisableSleep {
+		return nil
+	}
+	previous := 0
+	if state.PreviousDisableSleep != nil {
+		previous = *state.PreviousDisableSleep
+	}
+	if err := SetDisableSleep(ctx, previous, prompt); err != nil {
+		return fmt.Errorf("restore disablesleep to %d: %w", previous, err)
+	}
+	return nil
 }

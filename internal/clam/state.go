@@ -35,18 +35,20 @@ func DefaultPaths(home string) Paths {
 }
 
 type RuntimeState struct {
-	Enabled        bool       `json:"enabled"`
-	EnabledAt      *time.Time `json:"enabled_at,omitempty"`
-	TimeoutSeconds int64      `json:"timeout_seconds,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	BinaryPath     string     `json:"binary_path,omitempty"`
-	DaemonPID      int        `json:"daemon_pid,omitempty"`
-	CaffeinatePID  int        `json:"caffeinate_pid,omitempty"`
-	PMSetNoIdlePID int        `json:"pmset_noidle_pid,omitempty"`
-	IOKitAssertion bool       `json:"iokit_assertion,omitempty"`
-	LastLidClosed  *bool      `json:"last_lid_closed,omitempty"`
-	LastHeartbeat  *time.Time `json:"last_heartbeat,omitempty"`
-	LastError      string     `json:"last_error,omitempty"`
+	Enabled              bool       `json:"enabled"`
+	EnabledAt            *time.Time `json:"enabled_at,omitempty"`
+	TimeoutSeconds       int64      `json:"timeout_seconds,omitempty"`
+	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
+	BinaryPath           string     `json:"binary_path,omitempty"`
+	DaemonPID            int        `json:"daemon_pid,omitempty"`
+	CaffeinatePID        int        `json:"caffeinate_pid,omitempty"`
+	PMSetNoIdlePID       int        `json:"pmset_noidle_pid,omitempty"`
+	IOKitAssertion       bool       `json:"iokit_assertion,omitempty"`
+	ForceDisableSleep    bool       `json:"force_disable_sleep,omitempty"`
+	PreviousDisableSleep *int       `json:"previous_disable_sleep,omitempty"`
+	LastLidClosed        *bool      `json:"last_lid_closed,omitempty"`
+	LastHeartbeat        *time.Time `json:"last_heartbeat,omitempty"`
+	LastError            string     `json:"last_error,omitempty"`
 }
 
 type Status struct {
