@@ -35,7 +35,10 @@ func writeLaunchAgent(paths Paths, executable string) error {
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
@@ -64,22 +67,33 @@ func restartLaunchAgent(ctx context.Context, plistPath string) error {
 	if err := runLaunchctl(ctx, "bootstrap", launchDomain(), plistPath); err != nil {
 		return fmt.Errorf("load launch agent: %w", err)
 	}
-	if err := runLaunchctl(ctx, "kickstart", "-k", launchDomain()+"/"+LaunchLabel); err != nil {
-		return fmt.Errorf("start launch agent: %w", err)
-	}
 	return nil
 }
 
 func stopLaunchAgent(ctx context.Context, plistPath string) error {
-	err := runLaunchctl(ctx, "bootout", launchDomain(), plistPath)
+	err := runLaunchctl(ctx, "bootout", launchDomain()+"/"+LaunchLabel)
 	if err == nil || isLaunchctlNotLoaded(err) {
-		return nil
+		return waitForLaunchAgentUnloaded(ctx)
 	}
-	err = runLaunchctl(ctx, "bootout", launchDomain()+"/"+LaunchLabel)
+	err = runLaunchctl(ctx, "bootout", launchDomain(), plistPath)
 	if err == nil || isLaunchctlNotLoaded(err) {
-		return nil
+		return waitForLaunchAgentUnloaded(ctx)
 	}
 	return err
+}
+
+func waitForLaunchAgentUnloaded(ctx context.Context) error {
+	for i := 0; i < 20; i++ {
+		if !launchAgentLoaded(ctx) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil
 }
 
 func launchAgentLoaded(ctx context.Context) bool {
