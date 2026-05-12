@@ -32,3 +32,23 @@ func ParseLidState(output string) (LidState, error) {
 func DetectPowerSource(ctx context.Context) string {
 	return ""
 }
+
+func ReadDisableSleep(ctx context.Context) (int, error) {
+	return 0, errors.New("pmset disablesleep requires macOS")
+}
+
+func SetDisableSleep(ctx context.Context, value int, prompt bool) error {
+	return errors.New("pmset disablesleep requires macOS")
+}
+
+func InstallTrust(ctx context.Context) error {
+	return errors.New("clam trust requires macOS")
+}
+
+func RemoveTrust(ctx context.Context) error {
+	return errors.New("clam untrust requires macOS")
+}
+
+func TrustPath() string {
+	return ""
+}

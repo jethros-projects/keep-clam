@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -104,4 +105,57 @@ func DetectPowerSource(ctx context.Context) string {
 	line = strings.TrimPrefix(line, "Now drawing from ")
 	line = strings.Trim(line, "'")
 	return line
+}
+
+func ReadDisableSleep(ctx context.Context) (int, error) {
+	output, err := runPMSet(ctx, false, "-g", "custom")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "disablesleep" {
+			value, err := strconv.Atoi(fields[1])
+			if err != nil {
+				return 0, fmt.Errorf("parse disablesleep value %q: %w", fields[1], err)
+			}
+			return value, nil
+		}
+	}
+	return 0, nil
+}
+
+func SetDisableSleep(ctx context.Context, value int, prompt bool) error {
+	if value != 0 && value != 1 {
+		return fmt.Errorf("disablesleep value must be 0 or 1")
+	}
+	args := []string{"/usr/bin/pmset", "-a", "disablesleep", strconv.Itoa(value)}
+	var output string
+	var err error
+	if prompt {
+		output, err = runCommand(ctx, "/usr/bin/sudo", args...)
+	} else {
+		output, err = runCommand(ctx, "/usr/bin/sudo", append([]string{"-n"}, args...)...)
+	}
+	if err != nil {
+		if strings.TrimSpace(output) == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(output))
+	}
+	return nil
+}
+
+func runPMSet(ctx context.Context, useSudo bool, args ...string) (string, error) {
+	if useSudo {
+		return runCommand(ctx, "/usr/bin/sudo", append([]string{"/usr/bin/pmset"}, args...)...)
+	}
+	return runCommand(ctx, "/usr/bin/pmset", args...)
+}
+
+func runCommand(ctx context.Context, name string, args ...string) (string, error) {
+	childCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(childCtx, name, args...).CombinedOutput()
+	return string(output), err
 }
