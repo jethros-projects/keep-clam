@@ -16,8 +16,10 @@ func TestKeepClamHelpE2E(t *testing.T) {
 
 	for _, want := range []string{
 		"Keep Clam and Carry On",
-		"clam enable [--timeout 4h]",
+		"clam enable [--timeout 4h] [--force]",
 		"clam status [--json]",
+		"clam test [--duration 2m]",
+		"clam trust",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("help output missing %q:\n%s", want, output)

@@ -88,9 +88,12 @@ func (m Manager) daemonHeartbeat(state RuntimeState, keeper *powerKeeper, lastEr
 }
 
 func (m Manager) timeoutDisable(ctx context.Context) error {
+	_ = stopLaunchAgent(ctx, m.Paths.PlistPath)
+	state, _ := readState(m.Paths.StatePath)
+	_ = restoreDisableSleep(ctx, state, false)
 	_ = os.Remove(m.Paths.PlistPath)
 	_ = os.RemoveAll(m.Paths.StateDir)
-	return stopLaunchAgent(ctx, m.Paths.PlistPath)
+	return nil
 }
 
 type powerKeeper struct {
