@@ -11,7 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jethros-projects/keep-clam-cli/internal/clam"
+	"github.com/jethros-projects/keep-clam/internal/clam"
 )
 
 type Env struct {

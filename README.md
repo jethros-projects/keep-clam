@@ -1,12 +1,12 @@
-# keep-clam-cli
+# keep-clam
 
 Your agent is still working. Your laptop has a lid. `clam` helps the work survive the shell closing.
 
-Package: `github.com/jethros-projects/keep-clam-cli`.
+Package: `github.com/jethros-projects/keep-clam`.
 Command: `clam`.
 Platform: macOS.
 
-Docs: [install](#quick-install), [commands](#commands), [how it works](#the-clam-loop), [limits](#limits-of-the-shell), [development](#development), [issues](https://github.com/jethros-projects/keep-clam-cli/issues).
+Docs: [install](#quick-install), [commands](#commands), [how it works](#the-clam-loop), [limits](#limits-of-the-shell), [development](#development), [issues](https://github.com/jethros-projects/keep-clam/issues).
 
 Long-running local agents are no longer a novelty. They run coding sessions, browser automations, model jobs, workflow scripts, local MCP servers, and small overnight tasks that should not disappear because the laptop lid finally clicked shut.
 
@@ -28,14 +28,14 @@ Use it while developing when an agent needs another hour. Use it during automati
 ## Quick Install
 
 ```bash
-go install github.com/jethros-projects/keep-clam-cli/cmd/clam@latest
+go install github.com/jethros-projects/keep-clam/cmd/clam@latest
 ```
 
 Or build from a checkout:
 
 ```bash
-git clone https://github.com/jethros-projects/keep-clam-cli.git
-cd keep-clam-cli
+git clone https://github.com/jethros-projects/keep-clam.git
+cd keep-clam
 go build -o clam ./cmd/clam
 ```
 
@@ -67,39 +67,6 @@ clam test
 
 Stop there. You will know whether `clam` is active, whether the lid is open or closed, what power source macOS reports, which helper processes the worker is holding, and whether the Mac actually stayed awake while closed.
 
-## See It Work
-
-```text
-You:   clam enable --timeout 4h
-
-clam:  Clamming it shut...
-       Clam mode activated.
-       Your agents are now protected inside the shell.
-
-Agent: keeps running its local job
-
-You:   clam status
-
-clam:  Clam mode: active
-       Lid state:     closed
-       Power source:  AC Power
-       Launch agent:  loaded
-       Active for:    38 minutes
-
-You:   clam test
-
-clam:  Close the lid now. Reopen after the test duration.
-       Largest gap: 5 seconds
-       Result: PASS - the shell stayed awake for this test.
-
-You:   clam disable
-
-clam:  Clam mode disabled.
-       The shell is open and macOS power settings are back to normal.
-```
-
-The agent keeps working. You get a clean switch.
-
 ## What It Holds
 
 | Surface | Mechanism | Why it exists |
@@ -111,7 +78,7 @@ The agent keeps working. You get a clean switch.
 | Lid visibility | `ioreg -r -k AppleClamshellState` | Reports whether macOS currently sees the lid as open or closed. |
 | Local status | JSON state file | Tracks enable time, timeout, helper PIDs, heartbeat, lid state, and warnings. |
 | Force mode | `sudo pmset -a disablesleep 1` | Optional global sleep-disable override for Macs that ignore normal assertions on lid close. |
-| Trust setup | `/etc/sudoers.d/keep-clam-cli` | Optional narrow sudoers rule for the two exact `pmset disablesleep` commands. |
+| Trust setup | `/etc/sudoers.d/keep-clam` | Optional narrow sudoers rule for the two exact `pmset disablesleep` commands. |
 
 `clam` does not inspect your processes and does not try to guess which agent matters. It holds the Mac awake; you decide what deserves the shell.
 
@@ -171,7 +138,7 @@ To avoid repeated password prompts, run:
 clam trust
 ```
 
-That installs `/etc/sudoers.d/keep-clam-cli` with permission for your user to run only these exact commands without a password:
+That installs `/etc/sudoers.d/keep-clam` with permission for your user to run only these exact commands without a password:
 
 ```text
 /usr/bin/pmset -a disablesleep 1
@@ -195,16 +162,6 @@ That means normal mode is best effort. If the machine still sleeps when fully cl
 - Keep the lid slightly open on hardware that refuses software-only closed-lid wakefulness.
 
 `clam` does not use private IOKit lid-close SPI. It chooses boring public mechanisms, an explicit privileged override, honest status, and clean rollback.
-
-## Similar Tools And References
-
-`clam` is shaped by the same problem space as [Fermata](https://github.com/iccir/Fermata), [Amphetamine](https://iffy.freshdesk.com/support/solutions/articles/48001077199-amphetamine-closed-display-mode), and [Amphetamine Enhancer](https://github.com/x74353/Amphetamine-Enhancer). Those projects make the hard part clear: reliable closed-lid operation often depends on private APIs, privileged settings, or external display workarounds.
-
-Useful Apple references:
-
-- [IOKit power assertion types](https://developer.apple.com/documentation/iokit/iopmlib_h/iopmassertiontypes?changes=_3_5)
-- [IOPMAssertionCreateWithDescription](https://developer.apple.com/documentation/iokit/1557078-iopmassertioncreatewithdescripti)
-- [Apple closed-display requirements for Mac laptops](https://support.apple.com/en-us/HT201177)
 
 ## Uninstall
 

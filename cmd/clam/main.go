@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jethros-projects/keep-clam-cli/internal/cli"
+	"github.com/jethros-projects/keep-clam/internal/cli"
 )
 
 func main() {

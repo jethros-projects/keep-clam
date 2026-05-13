@@ -1,3 +1,3 @@
-module github.com/jethros-projects/keep-clam-cli
+module github.com/jethros-projects/keep-clam
 
 go 1.22

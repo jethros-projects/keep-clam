@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jethros-projects/keep-clam-cli/internal/clam"
+	"github.com/jethros-projects/keep-clam/internal/clam"
 )
 
 func TestParseEnableArgs(t *testing.T) {

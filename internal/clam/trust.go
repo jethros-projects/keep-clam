@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const sudoersPath = "/etc/sudoers.d/keep-clam-cli"
+const sudoersPath = "/etc/sudoers.d/keep-clam"
 
 var sudoersUserPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -30,7 +30,7 @@ func InstallTrust(ctx context.Context) error {
 		return err
 	}
 	script := `set -e
-path="/etc/sudoers.d/keep-clam-cli"
+path="/etc/sudoers.d/keep-clam"
 tmp="${path}.tmp"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
@@ -48,7 +48,7 @@ cat > "$tmp"
 
 func RemoveTrust(ctx context.Context) error {
 	script := `set -e
-/bin/rm -f /etc/sudoers.d/keep-clam-cli
+/bin/rm -f /etc/sudoers.d/keep-clam
 /usr/sbin/visudo -cf /etc/sudoers
 `
 	if output, err := runCommand(ctx, "/usr/bin/sudo", "/bin/sh", "-c", script); err != nil {
@@ -91,7 +91,7 @@ func sudoersContentForUser(username string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`# keep-clam-cli force mode
+	return fmt.Sprintf(`# keep-clam force mode
 # Allows %s to toggle only macOS disablesleep for clam --force.
 # Remove with: clam untrust
 %s ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0
