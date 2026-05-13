@@ -2,7 +2,7 @@
 
 Your agent is still working. Your laptop has a lid. `clam` helps the work survive the shell closing.
 
-Package: `github.com/jethros-projects/keep-clam`.
+Install: `curl -fsSL https://raw.githubusercontent.com/jethros-projects/keep-clam/main/install.sh | sh`.
 Command: `clam`.
 Platform: macOS.
 
@@ -12,7 +12,7 @@ Long-running local agents are no longer a novelty. They run coding sessions, bro
 
 Keeping the machine slightly open is not a power-management strategy. It is a superstition with a hinge.
 
-**`clam` is the smallest useful layer between your running work and macOS sleep.** It starts a per-user background worker, holds public power assertions, supervises `caffeinate` and `pmset noidle`, records local state, reports the lid and power source, and cleans up after itself when you disable it. When your Mac ignores normal assertions on lid close, force mode can also use `sudo pmset disablesleep 1` and restore the old setting on `clam disable`.
+**`clam` is the smallest useful layer between your running work and macOS sleep.** It is a plain shell command that installs a per-user background worker, supervises `caffeinate` and `pmset noidle`, records local state, reports the lid and power source, and cleans up after itself when you disable it. When your Mac ignores normal assertions on lid close, force mode can also use `sudo pmset disablesleep 1` and restore the old setting on `clam disable`.
 
 Use it while developing when an agent needs another hour. Use it during automation runs when you want the desk back. Use it with a timeout when you do not want a warm laptop grinding forever. Run `clam status` when you need to know whether the shell is actually being held.
 
@@ -28,15 +28,21 @@ Use it while developing when an agent needs another hour. Use it during automati
 ## Quick Install
 
 ```bash
-go install github.com/jethros-projects/keep-clam/cmd/clam@latest
+curl -fsSL https://raw.githubusercontent.com/jethros-projects/keep-clam/main/install.sh | sh
 ```
 
-Or build from a checkout:
+That installs `clam` into `~/.local/bin` and updates your shell profile if that directory is not already on `PATH`. Open a new terminal after install, or run this once in the current one:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Install from a checkout:
 
 ```bash
 git clone https://github.com/jethros-projects/keep-clam.git
 cd keep-clam
-go build -o clam ./cmd/clam
+./install.sh
 ```
 
 Start clam mode:
@@ -71,12 +77,11 @@ Stop there. You will know whether `clam` is active, whether the lid is open or c
 
 | Surface | Mechanism | Why it exists |
 |---|---|---|
-| Idle system sleep | IOKit `PreventUserIdleSystemSleep` assertion | Public macOS power assertion held by the worker process. |
 | Idle sleep helpers | `caffeinate -ims` | Uses Apple's built-in CLI to hold idle, disk, and system sleep assertions. |
 | No-idle fallback | `pmset noidle` | Keeps another public assertion path alive and supervised. |
 | Persistence | User `launchd` agent | Restarts the worker at login while clam mode is enabled. |
 | Lid visibility | `ioreg -r -k AppleClamshellState` | Reports whether macOS currently sees the lid as open or closed. |
-| Local status | JSON state file | Tracks enable time, timeout, helper PIDs, heartbeat, lid state, and warnings. |
+| Local status | State file | Tracks enable time, timeout, helper PIDs, heartbeat, lid state, and warnings. |
 | Force mode | `sudo pmset -a disablesleep 1` | Optional global sleep-disable override for Macs that ignore normal assertions on lid close. |
 | Trust setup | `/etc/sudoers.d/keep-clam` | Optional narrow sudoers rule for the two exact `pmset disablesleep` commands. |
 
@@ -94,7 +99,6 @@ clam enable starts
   -> state is written under ~/Library/Application Support/keep-clam
   -> a user launchd plist is installed under ~/Library/LaunchAgents
   -> launchd starts `clam daemon`
-  -> daemon creates an IOKit power assertion
   -> daemon starts caffeinate and pmset noidle
   -> every heartbeat records PIDs, lid state, and worker health
   -> timeout or disable unloads launchd and removes user state
@@ -116,7 +120,8 @@ Every enabled session gets a local heartbeat. If `caffeinate` or `pmset noidle` 
 | `clam toggle [--timeout 4h]` | Enables if inactive, disables if active. |
 | `clam trust` | Installs a narrow sudoers rule so force mode can toggle `disablesleep` without repeated password prompts. |
 | `clam untrust` | Removes that sudoers rule. |
-| `clam uninstall` | Runs the same cleanup path as disable and tells you to remove the binary. |
+| `clam update` | Reinstalls the latest script from GitHub. |
+| `clam uninstall` | Runs the same cleanup path as disable and removes an installed `~/.local/bin/clam` binary. |
 
 Timeouts accept Go-style durations such as `30m`, `4h`, and `90m`, plus day values like `1d`. Force mode intentionally does not accept `--timeout` yet because restoring a sudo-only global setting from a background user LaunchAgent is not reliable without a privileged helper.
 
@@ -161,7 +166,7 @@ That means normal mode is best effort. If the machine still sleeps when fully cl
 - Use a reputable dummy USB-C or HDMI display dongle so macOS enters an external-display-style clamshell mode.
 - Keep the lid slightly open on hardware that refuses software-only closed-lid wakefulness.
 
-`clam` does not use private IOKit lid-close SPI. It chooses boring public mechanisms, an explicit privileged override, honest status, and clean rollback.
+`clam` does not use private IOKit lid-close SPI. It chooses boring public commands, an explicit privileged override, honest status, and clean rollback.
 
 ## Uninstall
 
@@ -174,9 +179,9 @@ Then remove the binary from wherever you installed it, such as `$(go env GOPATH)
 ## Development
 
 ```bash
-go test ./...
-go vet ./...
-go run ./cmd/clam status
+sh -n clam install.sh
+tests/run_e2e.sh
+./clam status
 ```
 
-This project is macOS-first. Non-macOS builds are only stubs for clear error messages.
+This project is a vanilla shell repo. The shipped product is the root `clam` executable plus `install.sh`.

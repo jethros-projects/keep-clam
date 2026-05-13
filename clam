@@ -1,0 +1,867 @@
+#!/bin/sh
+set -u
+
+APP_NAME="keep-clam"
+BIN_NAME="clam"
+LABEL="com.jethros-projects.keep-clam"
+VERSION="0.2.0"
+
+HOME_DIR="${CLAM_HOME:-${HOME:-}}"
+STATE_DIR="${HOME_DIR}/Library/Application Support/${APP_NAME}"
+STATE_PATH="${STATE_DIR}/state.env"
+PLIST_PATH="${HOME_DIR}/Library/LaunchAgents/${LABEL}.plist"
+STDOUT_PATH="${STATE_DIR}/daemon.out.log"
+STDERR_PATH="${STATE_DIR}/daemon.err.log"
+SUDOERS_PATH="/etc/sudoers.d/keep-clam"
+LEGACY_SUDOERS_PATH="/etc/sudoers.d/keep-clam-cli"
+
+LAUNCHCTL="${CLAM_LAUNCHCTL:-/bin/launchctl}"
+PMSET="${CLAM_PMSET:-/usr/bin/pmset}"
+CAFFEINATE="${CLAM_CAFFEINATE:-/usr/bin/caffeinate}"
+IOREG="${CLAM_IOREG:-/usr/sbin/ioreg}"
+SUDO="${CLAM_SUDO:-/usr/bin/sudo}"
+SLEEP="${CLAM_SLEEP:-sleep}"
+VISUDO="${CLAM_VISUDO:-/usr/sbin/visudo}"
+UNAME="${CLAM_UNAME:-/usr/bin/uname}"
+
+if [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  BOLD="$(printf '\033[1m')"
+  DIM="$(printf '\033[2m')"
+  GREEN="$(printf '\033[32m')"
+  YELLOW="$(printf '\033[33m')"
+  RED="$(printf '\033[31m')"
+  CYAN="$(printf '\033[36m')"
+  RESET="$(printf '\033[0m')"
+else
+  BOLD=""
+  DIM=""
+  GREEN=""
+  YELLOW=""
+  RED=""
+  CYAN=""
+  RESET=""
+fi
+
+say() { printf '%s\n' "$*"; }
+note() { printf '%s\n' "${YELLOW}note${RESET} $*" >&2; }
+fail() { printf '%s\n' "${RED}clam:${RESET} $*" >&2; exit 1; }
+
+is_macos() {
+  [ "${CLAM_OS:-}" = "Darwin" ] || [ "$("$UNAME" -s 2>/dev/null || printf unknown)" = "Darwin" ]
+}
+
+require_macos() {
+  is_macos || fail "clam only supports macOS"
+}
+
+now_epoch() {
+  date +%s
+}
+
+format_epoch() {
+  epoch="$1"
+  if [ -z "$epoch" ] || [ "$epoch" = "0" ]; then
+    printf ''
+    return
+  fi
+  date -r "$epoch" '+%a, %d %b %Y %H:%M:%S %Z' 2>/dev/null ||
+    date -d "@$epoch" '+%a, %d %b %Y %H:%M:%S %Z' 2>/dev/null ||
+    printf '%s' "$epoch"
+}
+
+duration_seconds() {
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  suffix="$(printf '%s' "$value" | sed 's/.*\(.\)$/\1/')"
+  number="${value%$suffix}"
+  case "$suffix" in
+    s) multiplier=1 ;;
+    m) multiplier=60 ;;
+    h) multiplier=3600 ;;
+    d) multiplier=86400 ;;
+    *) return 1 ;;
+  esac
+  awk -v n="$number" -v m="$multiplier" 'BEGIN {
+    if (n !~ /^[0-9]+([.][0-9]+)?$/ || n <= 0) exit 1
+    seconds = int(n * m)
+    if (seconds < 1) seconds = 1
+    print seconds
+  }'
+}
+
+format_duration() {
+  total="${1:-0}"
+  [ "$total" -lt 0 ] 2>/dev/null && total=0
+  days=$((total / 86400))
+  total=$((total % 86400))
+  hours=$((total / 3600))
+  total=$((total % 3600))
+  minutes=$((total / 60))
+  seconds=$((total % 60))
+  out=""
+  count=0
+  append_part() {
+    n="$1"
+    unit="$2"
+    [ "$n" -le 0 ] && return
+    if [ "$n" -eq 1 ]; then part="1 $unit"; else part="$n ${unit}s"; fi
+    if [ -z "$out" ]; then out="$part"; else out="$out $part"; fi
+    count=$((count + 1))
+  }
+  append_part "$days" day
+  [ "$count" -lt 2 ] && append_part "$hours" hour
+  [ "$count" -lt 2 ] && append_part "$minutes" minute
+  [ "$count" -lt 2 ] && append_part "$seconds" second
+  [ -z "$out" ] && out="0 seconds"
+  printf '%s' "$out"
+}
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+xml_escape() {
+  printf '%s' "$1" |
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+bool_word() {
+  if [ "${1:-0}" = "1" ]; then printf true; else printf false; fi
+}
+
+script_path() {
+  case "$0" in
+    /*) path="$0" ;;
+    *)
+      path="$(command -v "$0" 2>/dev/null || printf '%s' "$0")"
+      case "$path" in
+        /*) ;;
+        *) path="$(pwd)/$path" ;;
+      esac
+      ;;
+  esac
+  dir="$(dirname "$path")"
+  base="$(basename "$path")"
+  if cd "$dir" 2>/dev/null; then
+    printf '%s/%s\n' "$(pwd -P)" "$base"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+reset_state_vars() {
+  state_enabled=0
+  state_enabled_at_epoch=0
+  state_timeout_seconds=0
+  state_expires_at_epoch=0
+  state_binary_path=""
+  state_daemon_pid=0
+  state_caffeinate_pid=0
+  state_pmset_noidle_pid=0
+  state_force_disable_sleep=0
+  state_previous_disable_sleep=""
+  state_last_lid_closed=""
+  state_last_heartbeat_epoch=0
+  state_last_error=""
+}
+
+load_state() {
+  reset_state_vars
+  if [ -f "$STATE_PATH" ]; then
+    # shellcheck disable=SC1090
+    . "$STATE_PATH"
+  fi
+}
+
+write_state() {
+  mkdir -p "$STATE_DIR"
+  tmp="${STATE_PATH}.tmp.$$"
+  {
+    printf 'state_enabled=%s\n' "${state_enabled:-0}"
+    printf 'state_enabled_at_epoch=%s\n' "${state_enabled_at_epoch:-0}"
+    printf 'state_timeout_seconds=%s\n' "${state_timeout_seconds:-0}"
+    printf 'state_expires_at_epoch=%s\n' "${state_expires_at_epoch:-0}"
+    printf 'state_binary_path=%s\n' "$(shell_quote "${state_binary_path:-}")"
+    printf 'state_daemon_pid=%s\n' "${state_daemon_pid:-0}"
+    printf 'state_caffeinate_pid=%s\n' "${state_caffeinate_pid:-0}"
+    printf 'state_pmset_noidle_pid=%s\n' "${state_pmset_noidle_pid:-0}"
+    printf 'state_force_disable_sleep=%s\n' "${state_force_disable_sleep:-0}"
+    printf 'state_previous_disable_sleep=%s\n' "$(shell_quote "${state_previous_disable_sleep:-}")"
+    printf 'state_last_lid_closed=%s\n' "$(shell_quote "${state_last_lid_closed:-}")"
+    printf 'state_last_heartbeat_epoch=%s\n' "${state_last_heartbeat_epoch:-0}"
+    printf 'state_last_error=%s\n' "$(shell_quote "${state_last_error:-}")"
+  } >"$tmp"
+  mv "$tmp" "$STATE_PATH"
+}
+
+launch_domain() {
+  printf 'gui/%s' "$(id -u)"
+}
+
+launch_agent_loaded() {
+  [ -x "$LAUNCHCTL" ] || return 1
+  "$LAUNCHCTL" print "$(launch_domain)/$LABEL" >/dev/null 2>&1
+}
+
+stop_launch_agent() {
+  [ -x "$LAUNCHCTL" ] || return 0
+  "$LAUNCHCTL" bootout "$(launch_domain)/$LABEL" >/dev/null 2>&1 ||
+    "$LAUNCHCTL" bootout "$(launch_domain)" "$PLIST_PATH" >/dev/null 2>&1 ||
+    true
+  i=0
+  while [ "$i" -lt 20 ]; do
+    launch_agent_loaded || return 0
+    "$SLEEP" 0.1
+    i=$((i + 1))
+  done
+}
+
+write_launch_agent() {
+  executable="$1"
+  mkdir -p "$(dirname "$PLIST_PATH")" "$STATE_DIR"
+  escaped_label="$(xml_escape "$LABEL")"
+  escaped_executable="$(xml_escape "$executable")"
+  escaped_stdout="$(xml_escape "$STDOUT_PATH")"
+  escaped_stderr="$(xml_escape "$STDERR_PATH")"
+  cat >"$PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escaped_label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escaped_executable}</string>
+    <string>daemon</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>${escaped_stdout}</string>
+  <key>StandardErrorPath</key>
+  <string>${escaped_stderr}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+}
+
+restart_launch_agent() {
+  stop_launch_agent
+  output="$("$LAUNCHCTL" bootstrap "$(launch_domain)" "$PLIST_PATH" 2>&1)" || {
+    printf '%s\n' "load launch agent: launchctl bootstrap: $output" >&2
+    return 1
+  }
+}
+
+pid_alive() {
+  pid="${1:-0}"
+  [ "$pid" -gt 0 ] 2>/dev/null || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+stop_pid() {
+  pid="${1:-0}"
+  pid_alive "$pid" || return 0
+  kill "$pid" >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt 20 ]; do
+    pid_alive "$pid" || return 0
+    "$SLEEP" 0.05
+    i=$((i + 1))
+  done
+  kill -9 "$pid" >/dev/null 2>&1 || true
+}
+
+detect_lid() {
+  lid_known=0
+  lid_closed=0
+  lid_raw=""
+  lid_error=""
+  if [ ! -x "$IOREG" ]; then
+    lid_error="lid state detection unavailable"
+    return
+  fi
+  lid_raw="$("$IOREG" -r -k AppleClamshellState 2>/dev/null | grep '"AppleClamshellState"' | head -n 1 || true)"
+  if [ -z "$lid_raw" ]; then
+    lid_error="AppleClamshellState not found"
+    return
+  fi
+  lid_known=1
+  case "$lid_raw" in
+    *"= Yes"*) lid_closed=1 ;;
+    *"= No"*) lid_closed=0 ;;
+    *) lid_known=0; lid_error="unrecognized AppleClamshellState value" ;;
+  esac
+}
+
+lid_description() {
+  if [ "${lid_known:-0}" != "1" ]; then
+    if [ -n "${lid_error:-}" ]; then printf 'unknown (%s)' "$lid_error"; else printf unknown; fi
+    return
+  fi
+  if [ "${lid_closed:-0}" = "1" ]; then printf closed; else printf open; fi
+}
+
+detect_power_source() {
+  if [ ! -x "$PMSET" ]; then
+    power_source=""
+    return
+  fi
+  power_source="$("$PMSET" -g batt 2>/dev/null | sed -n '1s/^Now drawing from //p' | sed "s/^'//; s/'$//")"
+}
+
+read_disable_sleep() {
+  value="$("$PMSET" -g custom 2>/dev/null | awk '$1 == "disablesleep" {print $2; exit}')"
+  if [ -z "$value" ]; then value=0; fi
+  printf '%s' "$value"
+}
+
+set_disable_sleep() {
+  value="$1"
+  prompt="${2:-1}"
+  if [ "$value" != "0" ] && [ "$value" != "1" ]; then
+    fail "disablesleep value must be 0 or 1"
+  fi
+  if [ "$prompt" = "1" ]; then
+    "$SUDO" "$PMSET" -a disablesleep "$value"
+  else
+    "$SUDO" -n "$PMSET" -a disablesleep "$value"
+  fi
+}
+
+restore_disable_sleep() {
+  prompt="${1:-1}"
+  load_state
+  [ "${state_force_disable_sleep:-0}" = "1" ] || return 0
+  previous="${state_previous_disable_sleep:-0}"
+  [ -z "$previous" ] && previous=0
+  set_disable_sleep "$previous" "$prompt"
+}
+
+parse_enable_args() {
+  enable_timeout_seconds=0
+  enable_force=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        fail "usage: clam enable [--timeout 4h] [--force]"
+        ;;
+      -t|--timeout)
+        [ "$#" -ge 2 ] || fail "--timeout needs a value like 4h, 90m, or 1d"
+        enable_timeout_seconds="$(duration_seconds "$2")" || fail "invalid timeout '$2'; use values like 4h, 90m, or 1d"
+        shift 2
+        ;;
+      --timeout=*)
+        value="${1#--timeout=}"
+        enable_timeout_seconds="$(duration_seconds "$value")" || fail "invalid timeout '$value'; use values like 4h, 90m, or 1d"
+        shift
+        ;;
+      --force)
+        enable_force=1
+        shift
+        ;;
+      *)
+        fail "unknown enable option '$1'; try 'clam enable --timeout 4h'"
+        ;;
+    esac
+  done
+  if [ "$enable_force" = "1" ] && [ "$enable_timeout_seconds" -gt 0 ]; then
+    fail "--force cannot be combined with --timeout yet; use 'clam enable --force' and run 'clam disable' to restore sleep"
+  fi
+}
+
+run_enable() {
+  require_macos
+  parse_enable_args "$@"
+  say "Clamming it shut..."
+  say ""
+  say "Safety tide check:"
+  say "  - Your Mac may run warm with the lid closed."
+  say "  - Battery will drain faster if you are not on power."
+  say "  - Recent Apple Silicon Macs can still have firmware or hardware limits."
+  if [ "$enable_force" = "1" ]; then
+    say "  - Force mode uses sudo to set global pmset disablesleep=1 until 'clam disable' restores it."
+  fi
+  say ""
+
+  executable="$(script_path)"
+  now="$(now_epoch)"
+  load_state
+  if [ "${state_enabled_at_epoch:-0}" = "0" ]; then
+    state_enabled_at_epoch="$now"
+  fi
+  state_enabled=1
+  state_binary_path="$executable"
+  state_daemon_pid=0
+  state_caffeinate_pid=0
+  state_pmset_noidle_pid=0
+  state_last_error=""
+  state_force_disable_sleep=0
+  state_previous_disable_sleep=""
+  state_timeout_seconds="$enable_timeout_seconds"
+  if [ "$enable_timeout_seconds" -gt 0 ]; then
+    state_expires_at_epoch=$((now + enable_timeout_seconds))
+  else
+    state_expires_at_epoch=0
+  fi
+
+  if [ "$enable_force" = "1" ]; then
+    previous="$(read_disable_sleep)" || fail "read disablesleep setting failed"
+    set_disable_sleep 1 1 || fail "enable force mode with sudo pmset disablesleep failed"
+    state_force_disable_sleep=1
+    state_previous_disable_sleep="$previous"
+  fi
+
+  write_state || {
+    restore_disable_sleep 1 >/dev/null 2>&1 || true
+    fail "write state failed"
+  }
+  write_launch_agent "$executable" || {
+    restore_disable_sleep 1 >/dev/null 2>&1 || true
+    fail "write launch agent failed"
+  }
+  restart_launch_agent || {
+    restore_disable_sleep 1 >/dev/null 2>&1 || true
+    rm -f "$PLIST_PATH"
+    rm -rf "$STATE_DIR"
+    exit 1
+  }
+
+  say "Clam mode activated."
+  say "Your agents are now protected inside the shell."
+  if [ "$state_expires_at_epoch" -gt 0 ]; then
+    say "Auto-disable: $(format_epoch "$state_expires_at_epoch") ($(format_duration "$enable_timeout_seconds") from now)"
+  else
+    say "Auto-disable: off"
+  fi
+  if [ "$state_force_disable_sleep" = "1" ]; then
+    say "Force mode: on; run 'clam disable' to restore normal sleep."
+  fi
+  say "Run 'clam status' to check the shell."
+}
+
+run_disable() {
+  stop_launch_agent
+  load_state
+  stop_pid "${state_caffeinate_pid:-0}"
+  stop_pid "${state_pmset_noidle_pid:-0}"
+  restore_disable_sleep 1 || fail "restore disablesleep failed"
+  rm -f "$PLIST_PATH"
+  rm -rf "$STATE_DIR"
+  say "Clam mode disabled."
+  say "The shell is open and macOS power settings are back to normal."
+}
+
+status_values() {
+  load_state
+  detect_lid
+  detect_power_source
+  if launch_agent_loaded; then status_launch_loaded=1; else status_launch_loaded=0; fi
+  status_active=0
+  now="$(now_epoch)"
+  if [ "${state_enabled:-0}" = "1" ] && [ "$status_launch_loaded" = "1" ]; then
+    status_active=1
+  fi
+  if [ "${state_expires_at_epoch:-0}" -gt 0 ] 2>/dev/null && [ "$now" -ge "$state_expires_at_epoch" ]; then
+    status_active=0
+  fi
+}
+
+print_status_text() {
+  status_values
+  if [ "$status_active" = "1" ]; then say "Clam mode: active"; else say "Clam mode: inactive"; fi
+  printf 'Lid state:         %s\n' "$(lid_description)"
+  printf 'Power source:      %s\n' "${power_source:-unknown}"
+  if [ "$status_launch_loaded" = "1" ]; then loaded_word=loaded; else loaded_word="not loaded"; fi
+  printf 'Launch agent:      %s\n' "$loaded_word"
+  now="$(now_epoch)"
+  if [ "${state_enabled_at_epoch:-0}" -gt 0 ] 2>/dev/null; then
+    printf 'Active for:        %s\n' "$(format_duration "$((now - state_enabled_at_epoch))")"
+  fi
+  if [ "${state_expires_at_epoch:-0}" -gt 0 ] 2>/dev/null; then
+    remaining=$((state_expires_at_epoch - now))
+    [ "$remaining" -lt 0 ] && remaining=0
+    printf 'Auto-disable in:   %s\n' "$(format_duration "$remaining")"
+  fi
+  [ "${state_daemon_pid:-0}" -gt 0 ] 2>/dev/null && printf 'Daemon PID:        %s\n' "$state_daemon_pid"
+  [ "${state_caffeinate_pid:-0}" -gt 0 ] 2>/dev/null && printf 'caffeinate PID:    %s\n' "$state_caffeinate_pid"
+  [ "${state_pmset_noidle_pid:-0}" -gt 0 ] 2>/dev/null && printf 'pmset noidle PID:  %s\n' "$state_pmset_noidle_pid"
+  if [ "${state_force_disable_sleep:-0}" = "1" ]; then
+    previous="${state_previous_disable_sleep:-unknown}"
+    [ -z "$previous" ] && previous=unknown
+    printf 'Force mode:        on (previous disablesleep=%s)\n' "$previous"
+  fi
+  [ "${state_last_heartbeat_epoch:-0}" -gt 0 ] 2>/dev/null && printf 'Last heartbeat:    %s\n' "$(format_epoch "$state_last_heartbeat_epoch")"
+  [ -n "${state_last_error:-}" ] && printf 'Last warning:      %s\n' "$state_last_error"
+  if [ "$status_active" != "1" ]; then
+    say "Run 'clam enable --force' for closed-lid testing, or 'clam enable --timeout 4h' for normal mode."
+    return
+  fi
+  if [ "${lid_known:-0}" = "1" ] && [ "${lid_closed:-0}" = "1" ]; then
+    say "The clam is shut; clam is holding the shell as best it can."
+  else
+    say "The clam is open; close it when your agents are settled."
+  fi
+}
+
+print_status_json() {
+  status_values
+  cat <<EOF
+{
+  "active": $(bool_word "$status_active"),
+  "launch_agent_loaded": $(bool_word "$status_launch_loaded"),
+  "power_source": "$(json_escape "${power_source:-}")",
+  "lid": {
+    "known": $(bool_word "${lid_known:-0}"),
+    "closed": $(bool_word "${lid_closed:-0}"),
+    "raw": "$(json_escape "${lid_raw:-}")",
+    "error": "$(json_escape "${lid_error:-}")"
+  },
+  "state": {
+    "enabled": $(bool_word "${state_enabled:-0}"),
+    "enabled_at_epoch": ${state_enabled_at_epoch:-0},
+    "timeout_seconds": ${state_timeout_seconds:-0},
+    "expires_at_epoch": ${state_expires_at_epoch:-0},
+    "binary_path": "$(json_escape "${state_binary_path:-}")",
+    "daemon_pid": ${state_daemon_pid:-0},
+    "caffeinate_pid": ${state_caffeinate_pid:-0},
+    "pmset_noidle_pid": ${state_pmset_noidle_pid:-0},
+    "force_disable_sleep": $(bool_word "${state_force_disable_sleep:-0}"),
+    "previous_disable_sleep": "$(json_escape "${state_previous_disable_sleep:-}")",
+    "last_lid_closed": "$(json_escape "${state_last_lid_closed:-}")",
+    "last_heartbeat_epoch": ${state_last_heartbeat_epoch:-0},
+    "last_error": "$(json_escape "${state_last_error:-}")"
+  }
+}
+EOF
+}
+
+run_status() {
+  json=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) json=1 ;;
+      -h|--help) say "usage: clam status [--json]"; return ;;
+      *) fail "unknown status option '$1'" ;;
+    esac
+    shift
+  done
+  if [ "$json" = "1" ]; then print_status_json; else print_status_text; fi
+}
+
+start_caffeinate() {
+  if pid_alive "${state_caffeinate_pid:-0}"; then return 0; fi
+  "$CAFFEINATE" -ims >/dev/null 2>&1 &
+  state_caffeinate_pid=$!
+}
+
+start_pmset_noidle() {
+  if pid_alive "${state_pmset_noidle_pid:-0}"; then return 0; fi
+  "$PMSET" noidle >/dev/null 2>&1 &
+  state_pmset_noidle_pid=$!
+}
+
+daemon_heartbeat() {
+  warning="$1"
+  detect_lid
+  state_enabled=1
+  state_daemon_pid=$$
+  state_last_heartbeat_epoch="$(now_epoch)"
+  if [ "${lid_known:-0}" = "1" ]; then
+    state_last_lid_closed="$lid_closed"
+  fi
+  state_last_error="$warning"
+  write_state
+}
+
+cleanup_helpers() {
+  stop_pid "${state_caffeinate_pid:-0}"
+  stop_pid "${state_pmset_noidle_pid:-0}"
+}
+
+timeout_disable() {
+  restore_disable_sleep 0 >/dev/null 2>&1 || true
+  rm -f "$PLIST_PATH"
+  rm -rf "$STATE_DIR"
+}
+
+run_daemon() {
+  require_macos
+  trap 'load_state; cleanup_helpers; exit 0' INT TERM HUP
+  load_state
+  [ "${state_enabled:-0}" = "1" ] || exit 0
+  while :; do
+    load_state
+    [ "${state_enabled:-0}" = "1" ] || exit 0
+    now="$(now_epoch)"
+    if [ "${state_expires_at_epoch:-0}" -gt 0 ] 2>/dev/null && [ "$now" -ge "$state_expires_at_epoch" ]; then
+      cleanup_helpers
+      timeout_disable
+      exit 0
+    fi
+    warning=""
+    start_caffeinate || warning="start caffeinate failed"
+    start_pmset_noidle || {
+      if [ -n "$warning" ]; then warning="$warning; start pmset noidle failed"; else warning="start pmset noidle failed"; fi
+    }
+    daemon_heartbeat "$warning"
+    "$SLEEP" "${CLAM_HEARTBEAT_INTERVAL:-15}"
+  done
+}
+
+parse_test_args() {
+  test_duration=120
+  test_interval=5
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        fail "usage: clam test [--duration 2m] [--interval 5s]"
+        ;;
+      -d|--duration)
+        [ "$#" -ge 2 ] || fail "--duration needs a value like 2m or 90s"
+        test_duration="$(duration_seconds "$2")" || fail "invalid duration '$2'; use values like 2m or 90s"
+        shift 2
+        ;;
+      --duration=*)
+        value="${1#--duration=}"
+        test_duration="$(duration_seconds "$value")" || fail "invalid duration '$value'; use values like 2m or 90s"
+        shift
+        ;;
+      -i|--interval)
+        [ "$#" -ge 2 ] || fail "--interval needs a value like 5s"
+        test_interval="$(duration_seconds "$2")" || fail "invalid interval '$2'; use values like 5s"
+        shift 2
+        ;;
+      --interval=*)
+        value="${1#--interval=}"
+        test_interval="$(duration_seconds "$value")" || fail "invalid interval '$value'; use values like 5s"
+        shift
+        ;;
+      *)
+        fail "unknown test option '$1'; try 'clam test --duration 2m'"
+        ;;
+    esac
+  done
+  [ "$test_interval" -lt "$test_duration" ] || fail "--interval must be shorter than --duration"
+}
+
+run_test() {
+  parse_test_args "$@"
+  status_values
+  [ "$status_active" = "1" ] || fail "clam mode is inactive; run 'clam enable --force' first, then 'clam test'"
+  say "Closed-lid test"
+  say "Duration: $(format_duration "$test_duration")"
+  say "Heartbeat: every $(format_duration "$test_interval")"
+  if [ "${state_force_disable_sleep:-0}" = "1" ]; then
+    say "Mode: force mode is on"
+  else
+    say "Mode: normal mode is on; closed-lid sleep may still win on this Mac"
+  fi
+  say ""
+  say "Close the lid now. Reopen after the test duration."
+  say "I will report the largest heartbeat gap when the Mac wakes or the test finishes."
+
+  start="$(now_epoch)"
+  previous="$start"
+  deadline=$((start + test_duration))
+  samples=1
+  max_gap=0
+  while [ "$(now_epoch)" -lt "$deadline" ]; do
+    "$SLEEP" "$test_interval"
+    current="$(now_epoch)"
+    gap=$((current - previous))
+    [ "$gap" -gt "$max_gap" ] && max_gap="$gap"
+    previous="$current"
+    samples=$((samples + 1))
+  done
+  tolerance=$((test_interval + 2))
+  if [ "$test_interval" -gt 10 ]; then tolerance=$((test_interval + test_interval / 2)); fi
+  say ""
+  say "Samples: $samples"
+  say "Largest gap: $(format_duration "$max_gap")"
+  if [ "$max_gap" -le "$tolerance" ]; then
+    say "Result: PASS - the shell stayed awake for this test."
+  else
+    say "Result: FAIL - the Mac slept or paused during the closed-lid window."
+    say "Next step: run 'clam enable --force' if you were in normal mode."
+  fi
+}
+
+current_username() {
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    username="$SUDO_USER"
+  else
+    username="${USER:-$(id -un 2>/dev/null || true)}"
+  fi
+  case "$username" in
+    *[!A-Za-z0-9_.-]*|'') fail "unsupported username '$username' for sudoers trust" ;;
+  esac
+  printf '%s' "$username"
+}
+
+sudoers_content() {
+  username="$1"
+  cat <<EOF
+# keep-clam force mode
+# Allows ${username} to toggle only macOS disablesleep for clam --force.
+# Remove with: clam untrust
+${username} ALL=(root) NOPASSWD: ${PMSET} -a disablesleep 1, ${PMSET} -a disablesleep 0
+EOF
+}
+
+run_trust() {
+  require_macos
+  username="$(current_username)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/keep-clam-sudoers.XXXXXX")"
+  sudoers_content "$username" >"$tmp"
+  "$VISUDO" -cf "$tmp" >/dev/null || {
+    rm -f "$tmp"
+    fail "generated sudoers rule did not validate"
+  }
+  say "Installing clam force-mode trust..."
+  say "This allows only these passwordless sudo commands:"
+  say "  ${PMSET} -a disablesleep 1"
+  say "  ${PMSET} -a disablesleep 0"
+  script='set -e
+path="/etc/sudoers.d/keep-clam"
+legacy="/etc/sudoers.d/keep-clam-cli"
+tmp="${path}.tmp"
+trap "rm -f \"$tmp\"" EXIT
+cat > "$tmp"
+/usr/sbin/visudo -cf "$tmp"
+/usr/sbin/chown root:wheel "$tmp"
+/bin/chmod 0440 "$tmp"
+/bin/mv "$tmp" "$path"
+/bin/rm -f "$legacy"
+/usr/sbin/visudo -cf /etc/sudoers
+'
+  "$SUDO" /bin/sh -c "$script" <"$tmp" || {
+    rm -f "$tmp"
+    fail "install sudoers trust failed"
+  }
+  rm -f "$tmp"
+  say "Trust installed at ${SUDOERS_PATH}."
+  say "You can now run 'clam enable --force' and 'clam disable' without repeated sudo prompts."
+}
+
+run_untrust() {
+  require_macos
+  script='set -e
+/bin/rm -f /etc/sudoers.d/keep-clam /etc/sudoers.d/keep-clam-cli
+/usr/sbin/visudo -cf /etc/sudoers
+'
+  "$SUDO" /bin/sh -c "$script" || fail "remove sudoers trust failed"
+  say "Trust removed from ${SUDOERS_PATH}."
+}
+
+run_toggle() {
+  status_values
+  if [ "$status_active" = "1" ]; then
+    run_disable
+  else
+    run_enable "$@"
+  fi
+}
+
+download_to_stdout() {
+  url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$url"
+  else
+    fail "missing curl or wget"
+  fi
+}
+
+run_update() {
+  install_dir="$(dirname "$(script_path)")"
+  url="${CLAM_INSTALL_URL:-https://raw.githubusercontent.com/jethros-projects/keep-clam/main/install.sh}"
+  say "Updating clam from ${url}"
+  download_to_stdout "$url" | INSTALL_DIR="$install_dir" sh
+}
+
+run_uninstall() {
+  run_disable >/dev/null 2>&1 || true
+  self="$(script_path)"
+  case "$self" in
+    "$HOME_DIR"/.local/bin/clam|/usr/local/bin/clam|/opt/homebrew/bin/clam)
+      rm -f "$self"
+      say "Removed ${self}."
+      ;;
+    *)
+      say "clam user state removed."
+      say "Remove this checkout or delete the installed clam binary to finish uninstalling."
+      ;;
+  esac
+}
+
+print_help() {
+  cat <<'EOF'
+clam - Keep Clam and Carry On
+
+Usage:
+  clam enable [--timeout 4h] [--force]
+  clam disable
+  clam status [--json]
+  clam test [--duration 2m]
+  clam toggle [--timeout 4h]
+  clam trust
+  clam untrust
+  clam update
+  clam uninstall
+
+Commands:
+  enable      Start clam mode and install the user launchd agent
+  disable     Stop clam mode and restore normal sleep settings
+  status      Show current state, lid state, and active duration
+  test        Run a guided closed-lid heartbeat test
+  toggle      Enable if inactive, disable if active
+  trust       Allow force mode to toggle pmset without repeated sudo prompts
+  untrust     Remove clam's sudoers rule
+  update      Reinstall the latest script from GitHub
+  uninstall   Disable clam and remove an installed ~/.local/bin/clam binary
+
+Examples:
+  clam enable --timeout 4h
+  clam enable --force
+  clam test
+  clam trust
+  clam status
+  clam disable
+EOF
+}
+
+case "${1:-help}" in
+  help|-h|--help) print_help ;;
+  --version|version) say "$VERSION" ;;
+  enable) shift; run_enable "$@" ;;
+  disable) shift; run_disable "$@" ;;
+  status) shift; run_status "$@" ;;
+  test) shift; run_test "$@" ;;
+  toggle) shift; run_toggle "$@" ;;
+  trust) shift; run_trust "$@" ;;
+  untrust) shift; run_untrust "$@" ;;
+  update|upgrade) shift; run_update "$@" ;;
+  uninstall) shift; run_uninstall "$@" ;;
+  daemon) shift; run_daemon "$@" ;;
+  *) fail "unknown command '$1'; try 'clam help'" ;;
+esac
